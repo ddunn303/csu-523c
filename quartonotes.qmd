@@ -1,0 +1,52 @@
+---
+title: "Quarto Notes"
+author: "Doug Dunn"
+format: html
+editor: visual
+---
+
+{r}
+
+\# R code
+
+1+1
+
+{r}
+
+\# Python
+
+1+ 1
+
+{r}
+
+\# add an image
+
+\# \![\](filepath)
+
+\# knitr::include_graphics(filepath)
+
+{r}
+
+\# echo = FALSE will not include code in rmd,
+
+\# for quarto:
+
+\# "#\| echo: false
+
+\# "#\| fig.align: "center" "
+
+\# "out.width: "100%" "
+
+{r}
+
+file: "\_quarto.yml" is global setting, in document overwrites this
+
+{r}
+
+To render docs to publish, in "\_quarto.yml", add:
+
+"output-dir: docs"
+
+make sure to have a docs folder
+
+{r}
