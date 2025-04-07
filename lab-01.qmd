@@ -525,6 +525,7 @@ ggplot(data = augmented_data,
              size = 2.5, alpha = 0.7, shape = 16) +
   geom_smooth(method = "lm", color = "black", size = 1, 
               linetype = "solid", se = FALSE) + 
+  geom_abline(color = "blue") +
   scale_color_manual(values = c("Fall" = "darkred", 
                                 "Spring" = "cyan", 
                                 "Summer" = "yellow", 
