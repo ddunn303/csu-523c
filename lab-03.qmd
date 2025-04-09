@@ -1,0 +1,65 @@
+---
+title: "Lab 03: Tesselations, Point-in-Polygon"
+subtitle: 'Ecosystem Science and Sustainability 523c'
+author: 
+  name: "Doug Dunn"
+  email: dunnd@colostate.edu 
+format: html
+editor: visual
+---
+
+# **Lab 3: Tesselations, Point-in-Polygon**
+
+## National Dam Inventory
+
+```{r}
+library(AOI)
+library(sf)
+library(ggplot2)
+library(tidyverse)
+```
+
+# Question 1
+
+## Step 1.1
+
+```{r}
+us_counties <- aoi_get(state = "conus", county = "all")
+
+st_crs(us_counties)
+
+us_counties <- st_transform(us_counties, crs = 5070)
+
+st_crs(us_counties)
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = us_counties)
+```
+
+## Step 1.2
+
+```{r}
+cnty_cntrs <- st_centroid(us_counties)
+```
+
+```{r}
+cnty_cntrs_ms <- st_cast(cnty_cntrs, "MULTIPOINT")
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = cnty_cntrs_ms)
+```
+
+## Step 1.3
+
+```{r}
+county_voroni <- st_voronoi(cnty_cntrs_ms)
+```
+
+```{r}
+ggplot() +
+  
+```
