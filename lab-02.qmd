@@ -24,10 +24,12 @@ library(rnaturalearthdata)
 library(gghighlight)
 library(ggrepel)
 library(knitr)
+library(ggtext)
 
 #data manipulation
 library(dplyr)
 library(flextable)
+
 
 ```
 
@@ -109,6 +111,7 @@ ggplot() +
 ## 2.1 Distance to USA Border (coastline or national, km)
 
 ```{r}
+#| tbl-cap: "Easystats 01"
 # change to multiline string
 usa_boundary <- us_states_sf %>% 
   summarise(geometry = st_union(geometry)) %>% 
@@ -129,6 +132,7 @@ city_nationalborder_dist <- city_center_sf %>%
 ```
 
 ```{r}
+#| tbl-cap: "Five Cities farthest from a International Border or Coastline"
 # flextable of five cities furthest from international border or coastline
 slice_max(city_nationalborder_dist, 
           n = 5, 
@@ -188,6 +192,7 @@ all_distances <- calculate_all_distances(city_center_sf, us_states_ms)
 ```
 
 ```{r}
+#| tbl-cap: "Five Cities farthest from a State Border"
 # flextable of five cities furthest from their respective State border
 slice_max(all_distances, n = 5, order_by = dist_to_bndry_km) %>% 
   select(city, state_name, dist_to_bndry_km) %>% 
@@ -227,6 +232,7 @@ mexico_dist <- city_center_sf %>%
 ```
 
 ```{r}
+#| tbl-cap: "Five Cities farthest from the border with Mexico"
 # flextable of five cities furthest from the border with Mexico
 slice_max(mexico_dist, 
           n = 5, 
@@ -266,6 +272,7 @@ canada_dist <- city_center_sf %>%
 ```
 
 ```{r}
+#| tbl-cap: "Five Cities farthest from the border with Canada"
 # flextable of five cities furthest from the border with Canada
 slice_max(canada_dist, 
           n = 5, 
@@ -314,8 +321,202 @@ ggplot() +
                                 "Canadian Border" = "red",
                                 "Mexican Border" = "green",
                                 "State Borders" = "gray"
-                                ), name = "Features") +
+                                ), name = "Borders") +
   labs(title = "10 Largest Cities in the US",
        x = NULL, y = NULL) +
+  theme_minimal()
+```
+
+## 3.2 City Distance from the Border
+
+```{r}
+top_5_int_dist <- city_nationalborder_dist %>% 
+  slice_max(order_by = dist_to_bndry_km, n = 5)
+
+ggplot() +
+  geom_sf(data = us_states_ms,
+          color = "gray") +
+  geom_sf(data = usa_boundary,
+          color = "black",
+          size = 8) +
+  geom_sf(data = city_nationalborder_dist,
+          aes(color = dist_to_bndry_km)) +
+  geom_sf(data = top_5_int_dist,
+          color = "black",
+          size = 4) +
+  geom_text_repel(data = top_5_int_dist, 
+                aes(label = city, geometry = geometry), 
+                stat = "sf_coordinates", 
+                size = 4) +
+  scale_color_gradient(low = "red", high = "blue") +
+  labs(title = "5 Cities furthest from the National Border",
+       x = NULL, y = NULL, color = "Distance to Border (km)") +
+  theme_minimal()
+```
+
+## 3.3 City Distance from Nearest State
+
+```{r}
+top_5_state_dist <- all_distances %>% 
+  slice_max(order_by = dist_to_bndry_km, n = 5)
+
+ggplot() +
+  geom_sf(data = us_states_ms,
+          color = "gray") +
+  geom_sf(data = usa_boundary,
+          color = "black",
+          size = 8) +
+  geom_sf(data = all_distances,
+          aes(color = dist_to_bndry_km)) +
+  geom_sf(data = top_5_state_dist,
+          color = "black",
+          size = 4) +
+  geom_text_repel(data = top_5_state_dist, 
+                aes(label = city, geometry = geometry), 
+                stat = "sf_coordinates", 
+                size = 4) +
+  scale_color_gradient(low = "red", high = "blue") +
+  labs(title = "5 Cities furthest from a State Border",
+       x = NULL, y = NULL, color = "Distance to Border (km)") +
+  theme_minimal()
+```
+
+## 3.4 Equidistance boundary from Mexico and Canada
+
+```{r}
+canada_mexico_city_dist <- canada_dist %>% 
+  st_join(select(mexico_dist, 
+                 dist_to_mexico = dist_to_bndry_km), 
+          by = "id")
+```
+
+```{r}
+top_5_can_mex <- canada_mexico_city_dist %>% 
+  filter(abs(dist_to_bndry_km - dist_to_mexico) <= 100) %>% 
+  slice_max(order_by = population, n = 5)
+
+ggplot() +
+  geom_sf(data = us_states_ms,
+          color = "gray") +
+  geom_sf(data = usa_boundary,
+          color = "black",
+          size = 8) +
+  geom_sf(data = canada_mexico_city_dist,
+          color = "blue") +
+  gghighlight(abs(dist_to_bndry_km - dist_to_mexico) <= 100) +
+  geom_sf(data = top_5_can_mex,
+          color = "black",
+          size = 4) +
+  geom_text_repel(data = top_5_can_mex, 
+                aes(label = city, geometry = geometry), 
+                stat = "sf_coordinates", 
+                size = 4,
+                fontface = "bold") +
+  labs(title = "Cities with equal distances to Canada and Mexico (+/- 100km)",
+       subtitle =  "Top 5 Cities by Population are labeled",
+       x = NULL, y = NULL) +
+  theme_minimal()
+```
+
+# Question 4
+
+## 4.1 Quantifing Border Zone
+
+```{r}
+cities_160km <- city_nationalborder_dist %>% 
+  filter(dist_to_bndry_km <= 160)
+
+city_summary <- data.frame(num_cities = nrow(cities_160km),
+                           total_pop = sum(cities_160km$population),
+                           perc_total_pop = (sum(cities_160km$population) / (sum(city_center_sf$population))*100)
+                           )
+  
+```
+
+```{r}
+#| tbl-cap: "Summary of City and Population within 100mi of External Boundary"
+# Transpose and include row names as a column
+city_summary_transposed <- data.frame(
+  Metric = c("Number of Cities", 
+             "Total Population", 
+             "Percent of USA Population"),
+  Value = as.numeric(t(city_summary))
+)
+
+# Create the flextable
+flextable(city_summary_transposed) %>% 
+  set_caption("Summary of City and Population within 100mi of External Boundary") %>%
+  set_header_labels(
+    Metric = "Metric",
+    Value = "Value"
+  ) %>%
+  colformat_double(digits = 0)
+```
+
+### The population and percent of USA population estimated by the ACLU is similar to these values, they estimated 200 million people and 2/3 of the USA population.
+
+## 4.2 Mapping Border Zone
+
+```{r}
+top_10_border_dist <- city_nationalborder_dist %>%
+  filter(dist_to_bndry_km <= 160) %>% 
+  slice_max(order_by = population, n = 10)
+
+city_nationalborder_dist <- city_nationalborder_dist %>% 
+  mutate(dist_to_bndry_mi = dist_to_bndry_km * 0.621371)
+
+ggplot() +
+  geom_sf(data = us_states_ms,
+          color = "gray") +
+  geom_sf(data = usa_boundary,
+          color = "black",
+          size = 8) +
+  geom_sf(data = city_nationalborder_dist,
+          aes(color = dist_to_bndry_km * 0.621371)) +
+  gghighlight(dist_to_bndry_km <= 160) +
+  geom_sf(data = top_10_border_dist,
+          color = "black",
+          size = 4) +
+  geom_text_repel(data = top_10_border_dist, 
+                aes(label = city, geometry = geometry), 
+                stat = "sf_coordinates", 
+                size = 4) +
+  scale_color_gradient(low = "darkred", high = "orange") +
+  labs(title = "THE DANGER ZONE: 10 Most Populous Cities within 100 mi of the National Border",
+       x = NULL, y = NULL, color = "City Center distance to Border (mi)") +
+  theme_minimal()
+```
+
+## 4.3 **Instead of labeling the 10 most populous cites, label the most populous city in each state within the Danger Zone**
+
+```{r}
+most_pop_cty <- city_nationalborder_dist %>%
+  filter(dist_to_bndry_km <= 160) %>%
+  group_by(state_name) %>% 
+    slice_max(order_by = population, n = 1) %>% 
+  ungroup()
+
+city_nationalborder_dist <- city_nationalborder_dist %>% 
+  mutate(dist_to_bndry_mi = dist_to_bndry_km * 0.621371)
+
+ggplot() +
+  geom_sf(data = us_states_ms,
+          color = "gray") +
+  geom_sf(data = usa_boundary,
+          color = "black",
+          size = 8) +
+  geom_sf(data = city_nationalborder_dist,
+          aes(color = dist_to_bndry_km * 0.621371)) +
+  gghighlight(dist_to_bndry_km <= 160) +
+  geom_sf(data = most_pop_cty,
+          color = "black",
+          size = 4) +
+  geom_text_repel(data = most_pop_cty, 
+                aes(label = city, geometry = geometry), 
+                stat = "sf_coordinates", 
+                size = 4) +
+  scale_color_gradient(low = "darkred", high = "orange") +
+  labs(title = "THE DANGER ZONE: Most Populous City within 100 mi of the National Border from each State",
+       x = NULL, y = NULL, color = "City Center distance to Border (mi)") +
   theme_minimal()
 ```
