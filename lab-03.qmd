@@ -17,6 +17,14 @@ library(AOI)
 library(sf)
 library(ggplot2)
 library(tidyverse)
+library(rmapshaper)
+library(mapview)
+library(units)
+library(knitr)
+library(kableExtra)
+library(gghighlight)
+library(leaflet)
+library(leafem)
 ```
 
 # Question 1
@@ -45,7 +53,8 @@ cnty_cntrs <- st_centroid(us_counties)
 ```
 
 ```{r}
-cnty_cntrs_ms <- st_cast(cnty_cntrs, "MULTIPOINT")
+cnty_cntrs_ms <- st_cast(cnty_cntrs, "MULTIPOINT") %>% 
+  st_combine()
 ```
 
 ```{r}
@@ -56,10 +65,362 @@ ggplot() +
 ## Step 1.3
 
 ```{r}
-county_voroni <- st_voronoi(cnty_cntrs_ms)
+# voroni tessellation
+county_voroni <- st_voronoi(cnty_cntrs_ms) %>% 
+  st_cast() %>% 
+  st_as_sf() %>% 
+  mutate(ID = 1:n())
+  
 ```
 
 ```{r}
 ggplot() +
+  geom_sf(data = county_voroni)
+```
+
+```{r}
+# triangulated tessellation
+county_trng <- st_triangulate(cnty_cntrs_ms) %>% 
+  st_cast() %>% 
+  st_as_sf() %>% 
+  mutate(ID = 1:n())
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = county_trng)
+```
+
+```{r}
+# square grid
+county_sqr <- st_make_grid(cnty_cntrs_ms, n = 70) %>% 
+  st_cast() %>% 
+  st_as_sf() %>% 
+  mutate(ID = 1:n())
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = county_sqr)
+```
+
+```{r}
+# hex grid
+county_hex <- st_make_grid(cnty_cntrs_ms, n = 70, square = FALSE) %>% 
+  st_cast() %>% 
+  st_as_sf() %>% 
+  mutate(ID = 1:n())
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = county_hex)
+```
+
+## Step 1.4
+
+```{r}
+# create CONUS object 
+conus_bndry <- st_union(us_counties)
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = conus_bndry)
+```
+
+```{r}
+# clip county voroni by CONUS
+county_voroni_clip <- st_intersection(county_voroni, conus_bndry)
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = county_voroni_clip)
+```
+
+```{r}
+# clip county trng by CONUS
+county_trng_clip <- st_intersection(county_trng, conus_bndry)
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = county_trng_clip)
+```
+
+county_trng_clip \<- st_intersection(county_trng, conus_bndry)
+
+```{r}
+# clip square by CONUS
+county_sqr_clip <- st_intersection(county_sqr, conus_bndry)
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = county_sqr_clip)
+```
+
+```{r}
+# clip county hex by CONUS
+county_hex_clip <- st_intersection(county_hex, conus_bndry)
+```
+
+```{r}
+ggplot() +
+  geom_sf(data = county_hex_clip)
+```
+
+## Step 1.5
+
+```{r}
+conus_simple <- ms_simplify(conus_bndry, keep = 0.03)
+  
+ggplot() +
+  geom_sf(data = conus_simple)
+
+npts(conus_bndry)
+npts(conus_simple)
+
+pts_removed <- npts(conus_bndry) - npts(conus_simple)
+
+print(paste0("Number of points removed = ", pts_removed))
+
+county_voroni_clip2 <- st_intersection(county_voroni, conus_simple)
+ggplot() +
+  geom_sf(data = county_voroni_clip2)
+
+county_trng_clip2 <- st_intersection(county_trng, conus_simple)
+ggplot() +
+  geom_sf(data = county_trng_clip2)
+```
+
+## Step 1.6
+
+```{r}
+plot_title_function = function(arg1, arg2){
+  ggplot() +
+    geom_sf(data = arg1, fill = "white", color = "navy", size = 0.2) +
+    labs(title = paste0("Tessellation Method: ", arg2),
+         caption = paste0("Number of features = ", nrow(arg1))) +
+    theme_void()
+  
+}
+```
+
+## Step 1.7
+
+```{r}
+plot_title_function(us_counties, "None")
+plot_title_function(county_voroni_clip2, "Voroni")
+plot_title_function(county_trng_clip2, "Delauny Traingulation")
+plot_title_function(county_sqr_clip, "Square")
+plot_title_function(county_hex_clip, "Hex")
+```
+
+# Question 2
+
+## Step 2.1
+
+```{r}
+sf_to_df = function(arg1, arg2){
+  arg1_area <- as.numeric(set_units(st_area(arg1), km^2))
+  data.frame(
+    Data = arg2,
+    num_features = nrow(arg1),
+    mean_area = mean(arg1_area),
+    sd_area = sd(arg1_area),
+    total_area = sum(arg1_area)
+  )
+}
+```
+
+## Step 2.2
+
+```{r}
+df_counties <- sf_to_df(us_counties, "US Counties")
+df_voroni <- sf_to_df(county_voroni_clip2, "Voroni")
+df_trng <- sf_to_df(county_trng_clip2, "Delauny Traingulation")
+df_sqr <- sf_to_df(county_sqr_clip, "Square")
+df_hex <- sf_to_df(county_hex_clip, "Hex")
+```
+
+## Step 2.3
+
+```{r}
+all_df <- bind_rows(df_counties, df_voroni, df_trng, df_sqr, df_hex)
+```
+
+## Step 2.4
+
+```{r}
+all_df %>%   
+  kable() %>% 
+  kable_minimal()
+```
+
+## Step 2.5
+
+The Voroni tessellation has a very similar number of features, average area of each feature, and total area as the original County data set, but with a lower standard deviation. This would be a good data set for similar scale resolution as the County data set but with features that were had a closer to standard size. The Delauny Triangulation has the largest number of features by far, with the smallest average area and total area. This would be a good data set for analysis needing a higher resolution. The Square tessellation has the smallest standard deviation, so this would be best for analysis looking for uniform feature area size. The hex tessellation has the smallest number of features with the largest average area, but still very uniform compared to others. It would be best for detailed calculations that need to be optimized to run quicker.
+
+# Question 3
+
+## Step 3.1
+
+```{r}
+usa <- AOI::aoi_get(state = "conus") %>% 
+  st_union() %>% 
+  st_transform(5070)
+
+nid_data <- read.csv("data/NID2019_U.csv") %>% 
+  filter(!is.na(LONGITUDE) & !is.na(LATITUDE)) %>% 
+  filter(LONGITUDE < -1 & LATITUDE != 0) %>% 
+  st_as_sf(coords = c("LONGITUDE", "LATITUDE"), crs = 4236) %>% 
+  st_transform(5070) %>% 
+  st_filter(usa)
+```
+
+## Step 3.2
+
+```{r}
+pnt_in_poly <- function(arg1, arg2, arg3){
+  polypoints <- st_join(arg2, arg1, join = st_contains)
+  
+  point_count <- polypoints %>% 
+    as.data.frame() %>%
+      group_by(.data[[arg3]]) %>%
+      summarise(n = n())
+  
+  updated_arg2 <- arg2 %>% 
+    left_join(point_count, by = arg3)
+  
+  return(updated_arg2)
+
+}
+```
+
+## Step 3.3
+
+```{r}
+#counties
+cnty_dams <- pnt_in_poly(nid_data, us_counties, arg3 = "feature_code")
+#voroni
+vor_dams <- pnt_in_poly(nid_data, county_voroni_clip2, arg3 = "ID")
+#delauny triangulation
+trng_dams <- pnt_in_poly(nid_data, county_trng_clip2, arg3 = "ID")
+#square grid
+sqr_dams <- pnt_in_poly(nid_data, county_sqr_clip, arg3 = "ID")
+#hex grid
+hex_dams <- pnt_in_poly(nid_data, county_hex_clip, arg3 = "ID")
+```
+
+## Step 3.4
+
+```{r}
+plot_title_dams = function(arg1, arg2){
+  ggplot() +
+    geom_sf(data = arg1, aes(fill = n), color = "navy", size = 0.2) +
+    scale_fill_viridis_c() +
+    labs(title = paste0("Dam density across the US by ", arg2),
+         caption = paste0("Total Number of dams = ", sum(arg1$n, na.rm = TRUE))) +
+    theme_void()
+}
+```
+
+## Step 3.5
+
+```{r}
+plot_title_dams(cnty_dams, "US Counties")
+plot_title_dams(vor_dams, "Voroni Tessellation")
+plot_title_dams(trng_dams, "Delauny Traingulation")
+plot_title_dams(sqr_dams, "Square Grid")
+plot_title_dams(hex_dams, "Hex Grid")
+```
+
+To me, the tessellations with more uniform features are more visually appealing. They also provide a good method for equal comparing densities. It is more difficult to accurately represent densities when features are significantly different sizes. Moving forward I am going to use the Hex Grid since it has uniform feature size and the least number of features (to allow for quicker calculations).
+
+# Question 4
+
+## Step 4.1
+
+```{r}
+#subset of flood control dams
+fc_dams <- nid_data %>% 
+  filter(grepl("F", PURPOSES))
+
+#subset of water supply dams
+ws_dams <- nid_data %>% 
+  filter(grepl("S", PURPOSES))
+
+#subset of irrigation dams
+ir_dams <- nid_data %>% 
+  filter(grepl("I", PURPOSES))
+
+#subset of hydroelectric dams
+he_dams <- nid_data %>% 
+  filter(grepl("H", PURPOSES))
+```
+
+```{r}
+fc_hex <- pnt_in_poly(fc_dams, county_hex_clip, arg3 = "ID")
+ws_hex <- pnt_in_poly(ws_dams, county_hex_clip, arg3 = "ID")
+ir_hex <- pnt_in_poly(ir_dams, county_hex_clip, arg3 = "ID")
+he_hex <- pnt_in_poly(he_dams, county_hex_clip, arg3 = "ID")
+```
+
+## Step 4.2
+
+```{r}
+plot_title_dams(fc_hex, "Flood Control Dams") +
+  gghighlight(n > (mean(n)+1))
+plot_title_dams(ws_hex, "Water Supply Dams") +
+  gghighlight(n > (mean(n)+1))
+plot_title_dams(ir_hex, "Irrigation Dams") +
+  gghighlight(n > (mean(n)+1))
+plot_title_dams(he_hex, "Hydroelectric Dams") +
+  gghighlight(n > (mean(n)+1))
+```
+
+## Step 4.3
+
+Flood control dams seem to be concentrated along mountain fronts and the main stem of major river basins. Water supply dams are concentrated near major population centers and the main stem of major river basins. Irrigation dams are concentrated in the arid west, mostly in the north, with other concentrations in east Texas and in the southeast. Hydroelectric dams are concentrated along the mountains on the west coast, in the center of the southeast, Minnesota/Michigan, and in New England. I am most surprised by the Irrigation dams in the southeast and the Hydroelectric dams in the New England.
+
+# Question 5
+
+```{r}
+major_rivers <- read_sf("data/majorrivers.shp")
+
+miss_river <- major_rivers %>% 
+  filter(SYSTEM == "Mississippi")
+```
+
+```{r}
+hh_dams <- nid_data %>% 
+  filter(HAZARD == "H") %>% 
+  group_by(STATE) %>% 
+    slice_max(order_by = NID_STORAGE, n = 1) %>% 
+  ungroup()
+```
+
+```{r}
+hh_dams <- st_transform(hh_dams, crs = 4326)
+
+leaflet(data = hh_dams) %>% 
+  addTiles() %>% 
+  addCircles(color = NULL, 
+             fillColor = "red",
+             stroke = FALSE,
+             fillOpacity = 1,
+             radius = (~NID_STORAGE / 150000),
+             popup = ~paste0(
+      "<strong>", DAM_NAME, "</strong><hr>",
+      "<b>Storage:</b> ", format(NID_STORAGE, big.mark = ","), " ac-ft<br>",
+      "<b>Purposes:</b> ", PURPOSES, "<br>",
+      "<b>Year Completed:</b> ", YEAR_COMPLETED
+    )
+    ) %>% 
+  addPolylines(data = miss_river)
   
 ```
+
+I ended up with more than one dam in some states if they largest dams had equal storage amounts (I decided to keep this). Also, the points ended up very small because the Soo Locks in Michigan really skew the Storage.
