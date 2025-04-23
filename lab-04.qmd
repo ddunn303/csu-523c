@@ -1,0 +1,401 @@
+---
+title: "Lab 04: Rasters & Remote Sensing"
+subtitle: 'Ecosystem Science and Sustainability 523c'
+author: 
+  name: "Doug Dunn"
+  email: dunnd@colostate.edu 
+format: html
+editor: visual
+---
+
+```{r}
+library(rstac) # STAC API
+library(terra) # Raster Data handling
+library(sf) # Vector data processing
+library(mapview) # Rapid Interactive visualization
+library(terra)
+library(dplyr)
+```
+
+## Step 1
+
+```{r}
+# get AOI for Palo, IA
+palo <- AOI::geocode("Palo, Iowa", bbox = TRUE)
+```
+
+## Step 2
+
+```{r}
+# set date range of interest
+temporal_range <- "2016-09-24/2016-09-29"
+```
+
+## Step 3
+
+```{r}
+# setup query parameters and setup request to planetary computer
+(stac_query <- stac("https://planetarycomputer.microsoft.com/api/stac/v1") |> 
+  stac_search(
+    id = 'LC08_L2SP_025031_20160926_02_T1',
+    collections = "landsat-c2-l2",
+    datetime    = temporal_range,
+    bbox        = st_bbox(palo)) |> 
+  get_request() |>
+  items_sign(sign_planetary_computer()))
+```
+
+## Step 4
+
+```{r}
+# Bands 1-6 of landsat
+bands <- c('coastal', 'blue', 'green', 'red', 'nir08', 'swir16')
+```
+
+```{r}
+# download rasters that fit the setup query, bands, and save to output directory
+assets_download(items = stac_query,
+                asset_names = bands, 
+                output_dir = 'data/landsat', 
+                overwrite = TRUE)
+```
+
+```{r}
+# list files downloaded from last code chunk
+list.files("data/landsat/landsat-c2/level-2/standard/oli-tirs/2016/025/031/LC08_L2SP_025031_20160926_20200906_02_T1", recursive = TRUE)
+
+raster_files <- list.files("data/landsat/landsat-c2/level-2/standard/oli-tirs/2016/025/031/LC08_L2SP_025031_20160926_20200906_02_T1", recursive = TRUE, full.names = TRUE)
+```
+
+```{r}
+raster_stack <- rast(raster_files)
+```
+
+```{r}
+raster_stack <- setNames(raster_stack, bands)
+```
+
+```{r}
+print(raster_stack)
+```
+
+## Question 1
+
+The dimensions are 7801 rows, 7681 columns, and 6 layers. The CRS is WGS 84 / UTM Zone 15N. The cell resolution is 30 x 30 meters.
+
+## Step 5: Analyze the images
+
+```{r}
+# transform AOI to match CRS of Rasters
+palo <- st_transform(palo, crs(raster_stack))
+```
+
+```{r}
+# crop rasters by palo AOI
+raster_crop <- crop(raster_stack, vect(palo))
+```
+
+```{r}
+# plot RGB bands with hist stretch
+plotRGB(raster_crop, r = 4, g = 3, b = 2, stretch = "hist")
+```
+
+```{r}
+# plot RGB bands with lin stretch
+plotRGB(raster_crop, r = 4, g = 3, b = 2, stretch = "lin")
+```
+
+```{r}
+# plot NIR,R,G bands with hist stretch
+plotRGB(raster_crop, r = 5, g = 4, b = 3, stretch = "hist")
+```
+
+```{r}
+# plot NIR,SWIR1,R bands with hist stretch
+plotRGB(raster_crop, r = 5, g = 6, b = 4, stretch = "hist")
+```
+
+```{r}
+# plot NIR,SWIR1,G bands with hist stretch
+plotRGB(raster_crop, r = 5, g = 6, b = 3, stretch = "hist")
+```
+
+Each image highlights different landscape features by changing which bands are being plotted in which spot. RGB looks the closest to what we would see with our own eyes. NIR, R, G highlights the forested, wetland, and natural vegetation areas. NIR, SWIR1, R does highlight the water features. The NIR, SWIR1, G was similar but produced a different green on the farm fields.
+
+# Question 3
+
+## Step 1: Raster Algebra
+
+```{r}
+# calculate and create NDVI raster
+ndvi_raster <- (raster_crop[["nir08"]] - raster_crop[["red"]]) /
+                (raster_crop[["nir08"]] + raster_crop[["red"]])
+```
+
+```{r}
+# calculate and create NDWI raster
+ndwi_raster <- (raster_crop[["green"]] - raster_crop[["nir08"]]) /
+                (raster_crop[["green"]] + raster_crop[["nir08"]])
+```
+
+```{r}
+# calculate and create MNDWI raster
+mndwi_raster <- (raster_crop[["green"]] - raster_crop[["swir16"]]) /
+                (raster_crop[["green"]] + raster_crop[["swir16"]])
+```
+
+```{r}
+# calculate and create WRI raster
+wri_raster <- (raster_crop[["green"]] + raster_crop[["red"]]) /
+              (raster_crop[["nir08"]] + raster_crop[["swir16"]])
+```
+
+```{r}
+# calculate and create SWI raster
+swi_raster <- 1 / sqrt(raster_crop[["blue"]] - raster_crop[["swir16"]])
+```
+
+```{r}
+# combining index rasters from above
+index_raster <- c(ndvi_raster, ndwi_raster, mndwi_raster, wri_raster, swi_raster)
+```
+
+```{r}
+# naming index rasters
+index_raster <- setNames(index_raster, c("ndvi", "ndwi", "mndwi", "wri", "swi"))
+```
+
+```{r}
+plot(index_raster, col = colorRampPalette(c("blue", "white", "red"))(256))
+```
+
+All 5 images seems to do a great job of highlighting water features, but they are identifying them with different values. SWI completely removes anything that it has not identified as water. The other four seem to have slight variations of the difference in extent of water and vegetation near the river.
+
+## Step 2: Raster Thresholding
+
+```{r}
+# Define a function to recode values to binary (1 = flooded, 0 = not flooded)
+# x = raster value, threshold = binary threshold, operator defines the ifelse
+flood_recode <- function(x, threshold = 0.1, operator = "><") {
+  # Apply ifelse based on the operator
+  if (operator == "<") {
+    return(ifelse(x < threshold, 1, 0))
+  } else if (operator == ">") {
+    return(ifelse(x > threshold, 1, 0))
+  } else if (operator == "<=") {
+    return(ifelse(x <= threshold, 1, 0))
+  } else if (operator == ">=") {
+    return(ifelse(x >= threshold, 1, 0))
+  } else if (operator == "==") {
+    return(ifelse(x == threshold, 1, 0))
+  } else if (operator == "0<") {
+    return(ifelse((x < threshold & x > 0), 1, 0))
+  } else {
+    stop("Invalid operator. Use '<', '>', '<=', '>=', or '=='.")
+  }
+}
+```
+
+```{r}
+# recode ndvi as flooded binary
+ndvi_binary <- app(ndvi_raster, flood_recode, threshold = 0.0, operator = "<")
+```
+
+```{r}
+# recode ndwi as flooded binary
+ndwi_binary <- app(ndwi_raster, flood_recode, threshold = 0.0, operator = ">")
+```
+
+```{r}
+# recode mndwi as flooded binary
+mndwi_binary <- app(mndwi_raster, flood_recode, threshold = 0.0, operator = ">")
+```
+
+```{r}
+# recode wri as flooded binary
+wri_binary <- app(wri_raster, flood_recode, threshold = 1.0, operator = ">")
+```
+
+```{r}
+# recode swi as flooded binary
+swi_binary <- app(swi_raster, flood_recode, threshold = 0.5, operator = "<")
+```
+
+```{r}
+# stacking raster binaries
+flood_binary <- c(ndvi_binary, ndwi_binary, mndwi_binary, wri_binary, swi_binary)
+```
+
+```{r}
+# set names for each layer in the combined binary
+flood_binary <- setNames(flood_binary, c("ndvi", "ndwi", "mndwi", "wri", "swi"))
+```
+
+```{r}
+# remove NAs from combined binary raster
+remove_na <- function(x){
+  ifelse(is.na(x), 0, x)
+}
+
+flood_binary <- app(flood_binary, remove_na)
+```
+
+```{r}
+# check for NAs
+freq(flood_binary, value = NA)
+```
+
+```{r}
+# set colors for white = not flooded, blue = flooded
+# plot combined raster binary
+colors <- c("white", "blue")
+
+plot(flood_binary, col = colors)
+```
+
+## Step 3
+
+Overall the binary rasters are very similar. MNDWI seems to have the most cells marked as flooded, and either NDWI or SWI seem to have the least cells.
+
+# Question 4
+
+## Step 1
+
+```{r}
+# set random number seed
+set.seed(123)
+```
+
+## Step 2
+
+```{r}
+flood_bin <- values(flood_binary)
+dim(flood_binary)
+```
+
+These show a value of 0 or 1 for each cell based on the index classification that was performed earlier.
+
+```{r}
+na.omit(flood_binary)
+```
+
+## Step 3 & 4
+
+```{r}
+flood_kmeans <- kmeans(flood_bin, 2)
+
+wri_copy <- wri_raster
+
+values(wri_copy) <- flood_kmeans[["cluster"]]
+
+plot(wri_copy)
+```
+
+```{r}
+flood_kmeans <- kmeans(flood_bin, 5)
+
+wri_copy <- wri_raster
+
+values(wri_copy) <- flood_kmeans[["cluster"]]
+
+plot(wri_copy)
+```
+
+```{r}
+flood_kmeans <- kmeans(flood_bin, 12)
+
+wri_copy <- wri_raster
+
+values(wri_copy) <- flood_kmeans[["cluster"]]
+
+plot(wri_copy)
+```
+
+## Step 5
+
+```{r}
+flood_table <- table(values(wri_binary), flood_kmeans[["cluster"]])
+```
+
+```{r}
+flooded_counts <- flood_table[2, ]
+max_flood_cluster <- as.integer(colnames(flood_table)[which.max(flooded_counts)])
+```
+
+```{r}
+flood_mask <- app(wri_copy, function(x) ifelse(x == max_flood_cluster, 1, 0))
+```
+
+```{r}
+flood_binary_mask <- c(flood_binary, flood_mask)
+names(flood_binary_mask) <- c(names(flood_binary), "wri_flood_mask")
+```
+
+```{r}
+colors <- c("white", "blue")
+
+plot(flood_binary_mask, col = colors)
+```
+
+# Question 5
+
+```{r}
+sum_flooded_areas <- global(flood_binary_mask, fun = "sum") %>% 
+  mutate(sum = (sum * (30*30))) %>% 
+  rename(area_sq_m = sum)
+print(sum_flooded_areas)
+```
+
+```{r}
+flood_sum <- sum(flood_binary_mask)
+  
+colors <- c("white", blues9)
+plot(flood_sum, col = colors)
+```
+
+```{r}
+flood_sum_copy <- flood_sum
+flood_sum_copy[flood_sum_copy == 0] <- NA
+```
+
+```{r}
+mapview(flood_sum_copy)
+```
+
+# Extra Credit
+
+```{r}
+mapview(palo, map.types = "Esri.WorldImagery")
+```
+
+```{r}
+res_flooding <- data.frame(longitude = -91.78951,
+                            latitude = 42.06310)
+res_flooding_sf <- st_as_sf(res_flooding, 
+                            coords = c("longitude", "latitude"),
+                            crs = 4326)
+
+```
+
+```{r}
+flood_point <- st_point(c(-91.78951, 42.06310))
+flood_point_sfc <- st_sfc(flood_point, crs = 4326)
+flood_crs <- crs(flood_binary_mask)
+flood_point_trn <- st_transform(flood_point_sfc, flood_crs)
+flood_extract <- extract(flood_binary_mask, res_flooding)
+```
+
+```{r}
+map <- mapview(flood_sum_copy, 
+               col.regions = blues9[3:9],  # Blues palette for non-NA values
+               layer.name = "Flood Sum",   # Name for raster layer
+               alpha.regions = 0.7,        # Slight transparency
+               map.types = "Esri.WorldImagery") + 
+       mapview(res_flooding_sf, 
+               col.regions = "red",        # Red point for visibility
+               cex = 5,                    # Point size
+               layer.name = "Residential Flooding")
+
+# Display the map
+map
+```

@@ -411,7 +411,7 @@ leaflet(data = hh_dams) %>%
              fillColor = "red",
              stroke = FALSE,
              fillOpacity = 1,
-             radius = (~NID_STORAGE / 150000),
+             radius = (~NID_STORAGE / 1500),
              popup = ~paste0(
       "<strong>", DAM_NAME, "</strong><hr>",
       "<b>Storage:</b> ", format(NID_STORAGE, big.mark = ","), " ac-ft<br>",

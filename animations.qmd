@@ -1,0 +1,50 @@
+---
+title: "Animation"
+author: "Doug Dunn"
+format: html
+editor: visual
+---
+
+## Animation of 4 dam removals
+
+```{r}
+library(magick)
+```
+
+```{r}
+# List of image file paths
+image_files <- c("dams/irongate_before.jpg",
+                 "dams/irongate_after.jpg",
+                 "dams/copco2_before.jpg",
+                 "dams/copco2_after.jpg",
+                 "dams/copco1_before.jpg",
+                 "dams/copco1_after.jpg", 
+                 "dams/jcboyle_before.jpg",
+                 "dams/jcboyle_after.jpg")
+# Read images into a list
+images <- lapply(image_files, image_read)
+```
+
+```{r}
+# Resize all images to 500x500 pixels
+target_size <- "500x500"
+images_resized <- lapply(images, function(img) {
+  image_resize(img, geometry = target_size)
+})
+```
+
+```{r}
+# Combine images into an animation
+animation <- image_animate(image_join(images_resized), delay = 200, loop = 0)
+# fps = 8 means 2 seconds per frame; loop = 0 means infinite looping
+```
+
+```{r}
+# Display animation
+print(animation)
+```
+
+```{r}
+# Save as GIF
+image_write(animation, path = "dams/animation.gif")
+```
