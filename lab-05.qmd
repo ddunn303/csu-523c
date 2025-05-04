@@ -1,0 +1,673 @@
+---
+title: "Lab 05: Machine Learning in Hydrology"
+subtitle: 'Ecosystem Science and Sustainability 523c'
+author: 
+  name: "Doug Dunn"
+  email: dunnd@colostate.edu 
+format: html
+editor: visual
+---
+
+```{r}
+library(tidymodels)
+library(ggplot2)
+library(tidyverse)
+library(powerjoin)
+library(glue)
+library(vip)
+library(baguette)
+library(ggthemes)
+library(gridExtra)
+library(patchwork)
+```
+
+```{r}
+# Use the `findNLDI` function to get the basin and flowlines for the first gauge
+basin <- dataRetrieval::findNLDI(nwis = "01013500", 
+                                 # Navigate the "upper tributaries" of the basin
+                                 nav = "UT", 
+                                 # Return the basin and flowlines
+                                 find = c("basin", "flowlines"))
+
+# Plot the basin, flowlines, and gauge ...
+ggplot() + 
+  geom_sf(data = basin$basin, fill = "lightblue") + 
+  geom_sf(data = basin$UT_flowlines, color = "blue") + 
+  geom_sf(data = basin$origin, color = "red") + 
+  theme_minimal()
+```
+
+```{r}
+# root url of where camels files are located
+root  <- 'https://gdex.ucar.edu/dataset/camels/file'
+```
+
+```{r}
+# download pdf of camels attributes
+download.file('https://gdex.ucar.edu/dataset/camels/file/camels_attributes_v2.0.pdf', 
+              'data/camels_attributes_v2.0.pdf')
+```
+
+```{r}
+# types of files we are interested in
+types <- c("clim", "geol", "soil", "topo", "vege", "hydro")
+```
+
+```{r}
+# Where the files live online ...
+remote_files  <- glue('{root}/camels_{types}.txt')
+# where we want to download the data ...
+local_files   <- glue('data/camels_{types}.txt')
+```
+
+```{r}
+# download files from the set parameters to our local directory
+walk2(remote_files, local_files, download.file, quiet = TRUE)
+```
+
+```{r}
+# Read and merge data
+camels <- map(local_files, read_delim, show_col_types = FALSE) 
+```
+
+```{r}
+# full join of every data.frame in the camels merged data
+camels <- power_full_join(camels ,by = 'gauge_id')
+```
+
+```{r}
+# Alternatively read and merge camels data directly from URL
+# this may fail if the url goes down
+camels <- map(remote_files, read_delim, show_col_types = FALSE) |> 
+  power_full_join(by = 'gauge_id')
+```
+
+# Question 1
+
+```{r}
+ggplot(data = camels, aes(x = gauge_lon, y = gauge_lat)) +
+  borders("state", colour = "gray50") +
+  geom_point(aes(color = q_mean)) +
+  scale_color_gradient(low = "pink", high = "dodgerblue") +
+  ggthemes::theme_map()
+```
+
+The variable zero_q_freq is the frequency of days with Q = 0 mm/day. This is represented as a percent, and is how often their is no flow.
+
+# Question 2
+
+```{r}
+# Plot 1: Colored by p_mean
+plot1 <- ggplot(data = camels, aes(x = gauge_lon, y = gauge_lat)) +
+  borders("state", colour = "gray50") +
+  geom_point(aes(color = p_mean)) +
+  scale_color_gradient(low = "lightblue", high = "darkblue", name = "Precipitation Mean") +
+  ggthemes::theme_map() +
+  labs(x = "Longitude", y = "Latitude", title = "Mean Precipitation") +
+  theme(legend.position = "bottom")
+
+# Plot 2: Colored by aridity
+plot2 <- ggplot(data = camels, aes(x = gauge_lon, y = gauge_lat)) +
+  borders("state", colour = "gray50") +
+  geom_point(aes(color = aridity)) +
+  scale_color_gradient(low = "darkgreen", high = "yellow", name = "Aridity") +
+  ggthemes::theme_map() +
+  labs(x = "Longitude", y = "Latitude", title = "Aridity") +
+  theme(legend.position = "bottom")
+
+# Combine plots with patchwork and add a shared title
+combined_plot <- (plot1 + plot2) +
+  plot_layout(ncol = 2) +
+  plot_annotation(
+    title = "Geographic Distribution of select CAMELS Data",
+    theme = theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+  )
+
+# Display the combined plot
+combined_plot
+```
+
+## Model Preparation
+
+```{r}
+camels |> 
+  select(aridity, p_mean, q_mean) |> 
+  drop_na() |> 
+  cor()
+```
+
+## Visual EDA
+
+```{r}
+# Create a scatter plot of aridity vs rainfall
+ggplot(camels, aes(x = aridity, y = p_mean)) +
+  # Add points colored by mean flow
+  geom_point(aes(color = q_mean)) +
+  # Add a linear regression line
+  geom_smooth(method = "lm", color = "red", linetype = 2) +
+  # Apply the viridis color scale
+  scale_color_viridis_c() +
+  # Add a title, axis labels, and theme (w/ legend on the bottom)
+  theme_linedraw() + 
+  theme(legend.position = "bottom") + 
+  labs(title = "Aridity vs Rainfall vs Runnoff", 
+       x = "Aridity", 
+       y = "Rainfall",
+       color = "Mean Flow")
+```
+
+```{r}
+ggplot(camels, aes(x = aridity, y = p_mean)) +
+  geom_point(aes(color = q_mean)) +
+  geom_smooth(method = "lm") +
+  scale_color_viridis_c() +
+  # Apply log transformations to the x and y axes
+  scale_x_log10() + 
+  scale_y_log10() +
+  theme_linedraw() +
+  theme(legend.position = "bottom") + 
+  labs(title = "Aridity vs Rainfall vs Runnoff", 
+       x = "Aridity", 
+       y = "Rainfall",
+       color = "Mean Flow")
+```
+
+```{r}
+ggplot(camels, aes(x = aridity, y = p_mean)) +
+  geom_point(aes(color = q_mean)) +
+  geom_smooth(method = "lm") +
+  # Apply a log transformation to the color scale
+  scale_color_viridis_c(trans = "log") +
+  scale_x_log10() + 
+  scale_y_log10() +
+  theme_linedraw() +
+  theme(legend.position = "bottom",
+        # Expand the legend width ...
+        legend.key.width = unit(2.5, "cm"),
+        legend.key.height = unit(.5, "cm")) + 
+  labs(title = "Aridity vs Rainfall vs Runnoff", 
+       x = "Aridity", 
+       y = "Rainfall",
+       color = "Mean Flow") 
+```
+
+## Model Building
+
+```{r}
+set.seed(123)
+# Bad form to perform simple transformations on the outcome variable within a 
+# recipe. So, we'll do it here.
+camels <- camels |> 
+  mutate(logQmean = log(q_mean))
+
+# Generate the split
+camels_split <- initial_split(camels, prop = 0.8)
+camels_train <- training(camels_split)
+camels_test  <- testing(camels_split)
+
+camels_cv <- vfold_cv(camels_train, v = 10)
+```
+
+```{r}
+# Create a recipe to preprocess the data
+rec <-  recipe(logQmean ~ aridity + p_mean, data = camels_train) %>%
+  # Log transform the predictor variables (aridity and p_mean)
+  step_log(all_predictors()) %>%
+  # Add an interaction term between aridity and p_mean
+  step_interact(terms = ~ aridity:p_mean) |> 
+  # Drop any rows with missing values in the pred
+  step_naomit(all_predictors(), all_outcomes())
+```
+
+```{r}
+# Prepare the data
+baked_data <- prep(rec, camels_train) |> 
+  bake(new_data = NULL)
+
+# Interaction with lm
+#  Base lm sets interaction terms with the * symbol
+lm_base <- lm(logQmean ~ aridity * p_mean, data = baked_data)
+summary(lm_base)
+```
+
+```{r}
+# Sanity Interaction term from recipe ... these should be equal!!
+summary(lm(logQmean ~ aridity + p_mean + aridity_x_p_mean, data = baked_data))
+```
+
+## Wrong version 1: augment
+
+```{r}
+nrow(camels_test)
+```
+
+```{r}
+nrow(camels_train)
+```
+
+```{r}
+#broom::augment(lm_base, data = camels_test)
+```
+
+## Wrong version 2: predict
+
+```{r}
+camels_test$p2 = predict(lm_base, newdata = camels_test)
+
+## Scales way off!
+ggplot(camels_test, aes(x = p2, y = logQmean)) + 
+  geom_point() + 
+  # Linear fit line, no error bands
+  geom_smooth(method = "lm", se = FALSE, size =1) +
+  # 1:1 line
+  geom_abline(color = "red", size = 1) + 
+  labs(title = "Linear Model Using `predict()`",
+       x = "Predicted Log Mean Flow",
+       y = "Observed Log Mean Flow") + 
+  theme_linedraw()
+```
+
+## Correct version: prep -\> bake -\> predict
+
+```{r}
+test_data <-  bake(prep(rec), new_data = camels_test)
+test_data$lm_pred <- predict(lm_base, newdata = test_data)
+```
+
+## Model Evaluation: statistical and visual
+
+```{r}
+metrics(test_data, truth = logQmean, estimate = lm_pred)
+```
+
+```{r}
+ggplot(test_data, aes(x = logQmean, y = lm_pred, colour = aridity)) +
+  # Apply a gradient color scale
+  scale_color_gradient2(low = "brown", mid = "orange", high = "darkgreen") +
+  geom_point() +
+  geom_abline(linetype = 2) +
+  theme_linedraw() + 
+  labs(title = "Linear Model: Observed vs Predicted",
+       x = "Observed Log Mean Flow",
+       y = "Predicted Log Mean Flow",
+       color = "Aridity")
+```
+
+## Using a Workflow
+
+```{r}
+# Define model
+lm_model <- linear_reg() %>%
+  # define the engine
+  set_engine("lm") %>%
+  # define the mode
+  set_mode("regression")
+
+# Instantiate a workflow ...
+lm_wf <- workflow() %>%
+  # Add the recipe
+  add_recipe(rec) %>%
+  # Add the model
+  add_model(lm_model) %>%
+  # Fit the model to the training data
+  fit(data = camels_train) 
+
+# Extract the model coefficients from the workflow
+summary(extract_fit_engine(lm_wf))$coefficients
+```
+
+```{r}
+# From the base implementation
+summary(lm_base)$coefficients
+```
+
+These results look exactly the same.
+
+## Making Predictions
+
+```{r}
+lm_data <- augment(lm_wf, new_data = camels_test)
+dim(lm_data)
+```
+
+```{r}
+metrics(lm_data, truth = logQmean, estimate = .pred)
+```
+
+```{r}
+ggplot(lm_data, aes(x = logQmean, y = .pred, colour = aridity)) +
+  scale_color_viridis_c() +
+  geom_point() +
+  geom_abline() +
+  theme_linedraw()
+```
+
+## Switch it up!
+
+```{r}
+library(baguette)
+rf_model <- rand_forest() %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+
+rf_wf <- workflow() %>%
+  # Add the recipe
+  add_recipe(rec) %>%
+  # Add the model
+  add_model(rf_model) %>%
+  # Fit the model
+  fit(data = camels_train) 
+```
+
+## Predictions
+
+```{r}
+rf_data <- augment(rf_wf, new_data = camels_test)
+dim(rf_data)
+```
+
+```{r}
+ggplot(rf_data, aes(x = logQmean, y = .pred, colour = aridity)) +
+  scale_color_viridis_c() +
+  geom_point() +
+  geom_abline() +
+  theme_linedraw()
+```
+
+## A workflow approach
+
+```{r}
+wf <- workflow_set(list(rec), list(lm_model, rf_model)) %>%
+  workflow_map('fit_resamples', resamples = camels_cv) 
+
+autoplot(wf)
+```
+
+```{r}
+rank_results(wf, rank_metric = "rsq", select_best = TRUE)
+```
+
+## Final Model
+
+```{r}
+rf_fin <- rand_forest() %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("regression")
+
+final <- workflow() |> 
+  add_recipe(rec) |> 
+  add_model(rf_fin) |> 
+  fit(data = camels_train) 
+```
+
+## Evaluation
+
+```{r}
+# VIP: 
+vip::vip(final)
+```
+
+```{r}
+## Predcition
+rf_data <- augment(final, new_data = camels_test)
+
+## Evaluation
+metrics(rf_data, truth = logQmean, estimate = .pred)
+```
+
+```{r}
+ggplot(rf_data, aes(x = logQmean, y = .pred, colour = aridity)) +
+  scale_color_viridis_c() +
+  geom_point() +
+  geom_abline() +
+  geom_smooth(method = "lm", col = 'red', lty = 2, se = FALSE) +
+  theme_linedraw() + 
+  labs(title = "Random Forest Model: Observed vs Predicted",
+       x = "Observed Log Mean Flow",
+       y = "Predicted Log Mean Flow",
+       color = "Aridity")
+```
+
+## Question 3
+
+```{r}
+# Define model
+xg_model <- boost_tree() %>%
+  # define the engine
+  set_engine("xgboost") %>%
+  # define the mode
+  set_mode("regression")
+```
+
+```{r}
+nn_model <- bag_mlp() %>%
+  # define the engine
+  set_engine("nnet") %>%
+  # define the mode
+  set_mode("regression")
+```
+
+```{r}
+model_set <- workflow_set(
+  preproc = list(camels_recipe = rec),
+  models = list(
+    rf = rf_fin,
+    xgboost = xg_model,
+    neural_net = nn_model
+  )
+)
+
+```
+
+```{r}
+set.seed(123)
+resamples <- vfold_cv(camels_train, v = 5)
+
+results <- model_set |> 
+  workflow_map(
+    resamples = resamples,
+    metrics = metric_set(rmse, rsq),
+    verbose = TRUE
+  )
+```
+
+```{r}
+collect_metrics(results)
+autoplot(results)  # nice visual comparison
+```
+
+I would choose the bag_mlp model since it has a smaller spread of rmse and the lowest rmse center. It also has a slightly higher rsq, but it not far from the other two model results.
+
+## Question 4
+
+### Data Spliting
+
+```{r}
+# data splitting
+set.seed(123)
+
+# Split data into 75% train, 25% test
+camels_split <- initial_split(camels, prop = 0.75, strata = logQmean)
+camels_train <- training(camels_split)
+camels_test <- testing(camels_split)
+
+# 10-fold cross-validation
+camels_folds <- vfold_cv(camels_train, v = 10)
+
+```
+
+### Recipe
+
+```{r}
+#recipe
+rec <- recipe(logQmean ~ p_mean + pet_mean + frac_snow + lai_max + soil_porosity + slope_mean, 
+              data = camels_train) |>
+  step_impute_median(all_predictors()) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_naomit(all_outcomes())
+
+```
+
+### 3 Models
+
+```{r}
+# define models
+rf_model <- rand_forest(mtry = 6, trees = 500, min_n = 10) |>
+  set_engine("ranger", importance = "permutation") |>
+  set_mode("regression")
+
+xg_model <- boost_tree(trees = 1000, learn_rate = 0.01) |>
+  set_engine("xgboost") |>
+  set_mode("regression")
+
+nn_model <- mlp(hidden_units = 6, penalty = 0.01) |>
+  set_engine("nnet") |>
+  set_mode("regression")
+
+```
+
+### Workflowset
+
+```{r}
+# workflow setup
+model_set <- workflow_set(
+  preproc = list(camels_recipe = rec),
+  models = list(
+    rf = rf_model,
+    xgboost = xg_model,
+    neural_net = nn_model
+  )
+)
+
+results <- model_set |> 
+  workflow_map(
+    resamples = camels_folds,
+    metrics = metric_set(rmse, rsq),
+    verbose = TRUE
+  )
+```
+
+### Evaluation
+
+```{r}
+# evaluation of model results
+autoplot(results)
+rank_results(results, rank_metric = "rsq") |> 
+  filter(.metric == "rsq")
+
+```
+
+### Test NN Model on Test Data
+
+```{r}
+# Extract the neural network workflow from the model_set
+final_workflow <- extract_workflow(model_set, "camels_recipe_neural_net")
+
+# Fit the workflow to the entire training data
+final_fit <- final_workflow %>% 
+  fit(data = camels_train)
+
+# Generate predictions on the test set using augment()
+results_test <- augment(final_fit, new_data = camels_test)
+
+# Evaluate performance on the test set
+test_metrics <- results_test %>%
+  metrics(truth = logQmean, estimate = .pred) %>%
+  filter(.metric %in% c("rmse", "rsq"))
+
+print(test_metrics)
+```
+
+### Plot of Predicted vs. Observed for NN Model
+
+```{r}
+ggplot(results_test, aes(x = logQmean, y = .pred)) +
+  geom_point() +
+  geom_abline() +
+  geom_smooth(method = "lm", col = 'red', lty = 2, se = FALSE) +
+  theme_linedraw() +
+  labs(x = "Observed logQmean", y = "Predicted logQmean", 
+       title = "Neural Net Model: Observed vs. Predicted")
+```
+
+The neural net model is the best because it has the highest (and only) R2 value over 0.9. The RMSE is also relative low, indicating that the sensitivity to outliers is less than the other models.
+
+### Model Tuning
+
+```{r}
+# neural network model with tunable hyperparameters
+nn_model_tune <- mlp(
+  hidden_units = tune(),  # Tune number of hidden units
+  penalty = tune(),       # Tune regularization penalty
+  epochs = 100            # Fixed number of epochs (adjust if needed)
+) %>%
+  set_engine("nnet") %>%
+  set_mode("regression")
+
+# workflow for the neural network
+nn_workflow <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(nn_model_tune)
+
+# Define a grid of hyperparameters to tune
+nn_grid <- grid_regular(
+  hidden_units(range = c(4, 10)),  # Try 4 to 10 hidden units
+  penalty(range = c(-3, 0)),       # Try 10^-3 to 10^0 (0.001 to 1)
+  levels = c(4, 4)                 # 4 levels for each parameter (16 combinations)
+)
+
+# Tune the model using tune_grid
+set.seed(123)
+nn_tune_results <- nn_workflow %>%
+  tune_grid(
+    resamples = camels_folds,
+    grid = nn_grid,
+    metrics = metric_set(rmse, rsq),
+    control = control_grid(verbose = TRUE)
+  )
+
+# Show the best hyperparameter combinations for rsq
+best_nn_params <- show_best(nn_tune_results, metric = "rsq", n = 5)
+print(best_nn_params)
+
+# Select the best hyperparameters
+final_nn_params <- select_best(nn_tune_results, metric = "rsq")
+
+# Finalize the workflow with the best hyperparameters
+final_nn_model <- finalize_model(nn_model_tune, final_nn_params)
+final_workflow <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(final_nn_model)
+
+# Fit the final tuned model on the full training data
+final_fit <- final_workflow %>%
+  fit(data = camels_train)
+
+# Evaluate the final model on the test set
+results_test <- augment(final_fit, new_data = camels_test)
+
+# Calculate test set metrics
+test_metrics <- results_test %>%
+  metrics(truth = logQmean, estimate = .pred) %>%
+  filter(.metric %in% c("rmse", "rsq"))
+
+# Print test set metrics
+print(test_metrics)
+
+# plot observed vs. predicted
+library(ggplot2)
+results_test %>%
+  ggplot(aes(x = logQmean, y = .pred)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  labs(x = "Observed logQmean", y = "Predicted logQmean", 
+       title = "Tuned Neural Network: Test Set Predictions")
+```
+
+### Check VIP
+
+```{r error=TRUE}
+vip(results_test)
+```
+
+VIP is unable to work on the neural net model because it is more of a black box and we do not know exactly what is going on. It does give us good results but we have less of an understanding of the roles each variable is playing in model and how they are being used. It helps use understand that the variables used can predict streamflow, but we are not sure exactly how and so other study would be needed to further determine what exactly those relationships are. Overall the model fits the data well, and does a good job of fitting predictions to observations. There is more spread at very low streamflows, indicating that the model may be less effective at lower flows.

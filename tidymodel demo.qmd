@@ -1,0 +1,134 @@
+---
+title: "Untitled"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(flextable)
+library(dplyr)
+library(zoo)
+library(patchwork)
+library(scales)
+library(broom)
+library(skimr)
+library(tidymodels)
+library(ggplot2)
+```
+
+```{r}
+pop_url <- 'https://www2.census.gov/programs-surveys/popest/datasets/2020-2023/counties/totals/co-est2023-alldata.csv'
+```
+
+```{r}
+covid_url <- 'https://raw.githubusercontent.com/nytimes/covid-19-data/master/us-states.csv'
+```
+
+```{r}
+data <- read_csv(covid_url, show_col_types = FALSE)
+```
+
+```{r}
+census <- read_csv(pop_url, show_col_types = FALSE) %>%
+  filter(COUNTY == '000') %>% 
+  mutate(fips = STATE) %>% 
+  select(fips, contains("2021"))
+
+```
+
+```{r}
+# clean data
+state_data <- data %>% 
+  group_by(fips) %>% 
+  mutate(new_cases = pmax(0, cases - lag(cases)),
+         new_deaths = pmax(0, deaths - lag(deaths))
+         ) %>% 
+  ungroup() %>% 
+  left_join(census, by = "fips") %>% 
+  mutate(
+    y = year(date),
+    m = month(date),
+    season = case_when(
+      m >= 3 & m <=5 ~ "Spring",
+      m >= 6 & m <=8 ~ "Summer",
+      m >= 9 & m <=11 ~ "Fall",
+      m == 12 | m == 1 | m == 2 ~ "Winter"
+    )) %>% 
+  group_by(state, y, season) %>% 
+    mutate(season_cases = sum(new_cases, na.rm = TRUE),
+           season_deaths = sum(new_deaths, na.rm = TRUE)) %>% 
+    distinct(state, y, season, .keep_all = TRUE) %>% 
+  ungroup() %>% 
+  drop_na() %>% 
+  mutate(logC = log(season_cases + 1))
+
+skim(state_data)
+```
+
+```{r}
+set.seed(123)
+
+split <- initial_split(state_data, prop = 0.8, strata = season)
+s_train <- training(split)
+s_testing <- testing(split)
+s_folds <- vfold_cv(s_train, v =10)
+
+```
+
+```{r}
+rec <- recipe(logC ~., data = state_data) %>% 
+  step_rm(season_cases, state, date) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_scale(all_numeric_predictors()) %>% 
+  step_center(all_numeric_predictors())
+```
+
+```{r}
+lm_mod = linear_reg() %>% 
+  set_engine("lm") %>% 
+  set_mode("regression")
+
+rf_mod = rand_forest() %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+b_mod = boost_tree() %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+nm_mod = mlp() %>% 
+  set_engine("nnet") %>% 
+  set_mode("regression")
+```
+
+```{r}
+wf <- workflow_set(list(rec), list(lm_mod, rf_mod, b_mod, nm_mod)) %>% 
+  workflow_map(resamples = s_folds)
+
+wf
+
+autoplot(wf) + theme_linedraw()
+```
+
+```{r}
+fit <- workflow() %>% 
+  add_recipe(rec) %>% 
+  add_model(rf_mod) %>% 
+  fit(data = s_train)
+```
+
+```{r}
+vip(fit)
+```
+
+```{r}
+predictions = augment(fit, new_data = s_testing)
+
+metrics(predictions, truth = logC, estimate = .pred)
+
+ggplot(predictions, aes(x = logC, y = .pred)) +
+  geom_point() +
+  geom_abline() +
+  geom_smooth()
+```
