@@ -1,0 +1,878 @@
+---
+title: "Lab 07: Timeseries Data, Poudre River Forecast"
+subtitle: 'Ecosystem Science and Sustainability 523c'
+author: 
+  name: "Doug Dunn"
+  email: dunnd@colostate.edu 
+format: html
+editor: visual
+---
+
+## Libraries
+
+```{r}
+library(tidyverse) # for data cleaning
+library(plotly)    # for interactive plots
+
+library(dataRetrieval) # for downloading data from USGS
+library(climateR)      # for downloading climate data 
+library(terra)         # for working with raster data
+library(exactextractr) # for zonal extraction
+
+library(tidymodels) # for ML modeling
+
+library(tsibble)   # for time series data structure
+library(modeltime) # for time series modeling
+library(feasts)    # for time series analysis
+library(timetk)    # for time series analysis
+
+library(dplyr)
+library(earth)
+library(knitr)
+library(flextable)
+library(ggplot2)
+```
+
+## Getting Data
+
+```{r}
+# Example: Cache la Poudre River at Mouth (USGS site 06752260)
+poudre_flow <- readNWISdv(siteNumber = "06752260",    # Download data from USGS for site 06752260
+                          parameterCd = "00060",      # Parameter code 00060 = discharge in cfs)
+                          startDate = "2013-01-01",   # Set the start date
+                          endDate = "2023-12-31") |>  # Set the end date
+  renameNWISColumns() |>                              # Rename columns to standard names (e.g., "Flow", "Date")
+  mutate(Date = yearmonth(Date)) |>                   # Convert daily Date values into a year-month format (e.g., "2023 Jan")
+  group_by(Date) |>                                   # Group the data by the new monthly Date
+  summarise(Flow = mean(Flow))                       # Calculate the average daily flow for each month
+```
+
+### Find Cache la Poudre River basin
+
+```{r}
+basin <- findNLDI(nwis = "06752260", find = "basin")
+
+mapview::mapview(basin$basin)
+```
+
+### Download TerraClim data
+
+```{r}
+sdate <- as.Date("2013-01-01")
+edate <- as.Date("2023-12-31")
+
+gm <- getTerraClim(AOI = basin$basin, 
+                             var = c("tmax", "ppt", "srad"), 
+                             startDate = sdate,   
+                             endDate = edate) |> 
+  unlist() |> 
+  rast() |> 
+  exact_extract(basin$basin, "mean", progress = FALSE)
+
+historic <- mutate(gm, id = "gridmet") |> 
+  pivot_longer(cols = -id) |> 
+  mutate(name = sub("^mean\\.", "", name)) %>%
+  tidyr::extract(name, into = c("var", "index"), "(.*)_([^_]+$)") |> 
+  mutate(index = as.integer(index)) |> 
+  mutate(Date = yearmonth(seq.Date(sdate, edate, by = "month")[as.numeric(index)])) |> 
+  pivot_wider(id_cols = Date, names_from = var, values_from = value) |> 
+  right_join(poudre_flow, by = "Date")
+```
+
+### Get MACA data
+
+```{r}
+sdate <- as.Date("2024-01-01")
+edate <- as.Date("2033-12-01")
+
+maca <- getMACA(AOI = basin$basin, 
+                var = c("tasmax", "pr", "rsds"), 
+                timeRes = "month",
+                startDate = sdate,   
+                endDate = edate) |> 
+  unlist() |> 
+  rast() |> 
+  exact_extract(basin$basin, "mean", progress = FALSE)
+
+future <- mutate(maca, id = "maca") |> 
+  pivot_longer(cols = -id) |> 
+  mutate(name = sub("^mean\\.", "", name))  |> 
+  tidyr::extract(name, into = c("var", "index"), "(.*)_([^_]+$)") |> 
+  mutate(index = as.integer(index)) |> 
+  mutate(Date = yearmonth(seq.Date(sdate, edate, by = "month")[as.numeric(index)])) |> 
+  pivot_wider(id_cols = Date, names_from = var, values_from = value) 
+
+names(future) <- c("Date", "ppt", "srad", "tmax")
+
+future <- mutate(future, tmax = tmax - 273.15)
+```
+
+## 1. Convert to tsibble
+
+```{r}
+historic_ts <- as_tsibble(historic, index = Date)
+```
+
+## 2. Plotting the time series
+
+```{r}
+# Define colors
+colors <- c("ppt" = "blue", "srad" = "yellow", "tmax" = "red", "Flow" = "black")
+
+# Create a list of plots
+plot_list <- list()
+
+# Plot for ppt
+plot_list$ppt <- ggplot(historic_ts, aes(x = as_date(Date), y = ppt)) +
+  geom_line(color = colors["ppt"]) +
+  geom_point(color = colors["ppt"], size = 2) +
+  labs(title = "Monthly Precipitation", x = "Date", y = "Precipitation (mm)") +
+  theme_minimal()
+
+# Plot for srad
+plot_list$srad <- ggplot(historic_ts, aes(x = as_date(Date), y = srad)) +
+  geom_line(color = colors["srad"]) +
+  geom_point(color = colors["srad"], size = 2) +
+  labs(title = "Monthly Solar Radiation", x = "Date", y = "Solar Radiation (W/m²)") +
+  theme_minimal()
+
+# Plot for tmax
+plot_list$tmax <- ggplot(historic_ts, aes(x = as_date(Date), y = tmax)) +
+  geom_line(color = colors["tmax"]) +
+  geom_point(color = colors["tmax"], size = 2) +
+  labs(title = "Monthly Maximum Temperature", x = "Date", y = "Temperature (°C)") +
+  theme_minimal()
+
+# Plot for Flow
+plot_list$Flow <- ggplot(historic_ts, aes(x = as_date(Date), y = Flow)) +
+  geom_line(color = colors["Flow"]) +
+  geom_point(color = colors["Flow"], size = 2) +
+  labs(title = "Monthly Flow", x = "Date", y = "Flow (m³/s)") +
+  theme_minimal()
+
+# Display plots (optional)
+lapply(plot_list, print)
+```
+
+```{r}
+date_range <- range(as_date(historic_ts$Date), na.rm = TRUE)
+
+# Define colors
+colors <- c("ppt" = "blue", "srad" = "yellow", "tmax" = "red", "Flow" = "black")
+
+# Sort data by Date to ensure correct animation order
+historic_ts <- historic_ts %>% arrange(Date)
+
+# Create a list for animated plots
+plotly_list <- list()
+
+# ppt
+plotly_list$ppt <- plot_ly(historic_ts) %>%
+  add_trace(
+    x = ~as_date(Date),
+    y = ~ppt,
+    frame = ~as_date(Date),  # Animate by Date
+    type = "scatter",
+    mode = "lines+markers",
+    line = list(shape = "linear"),
+    marker = list(color = colors["ppt"], size = 8)
+  ) %>%
+  layout(
+    title = "Monthly Precipitation",
+    xaxis = list(
+      title = "Date",
+      range = date_range  # Fix x-axis to 2013 Jan - 2023 Dec
+    ),
+    yaxis = list(title = "Precipitation (mm)"),
+    showlegend = FALSE
+  ) %>%
+  animation_opts(frame = 1000, transition = 500, redraw = TRUE) %>%
+  animation_slider(currentvalue = list(prefix = "Month: ", font = list(size = 12)))
+
+# srad
+plotly_list$srad <- plot_ly(historic_ts) %>%
+  add_trace(
+    x = ~as_date(Date),
+    y = ~srad,
+    frame = ~as_date(Date),
+    type = "scatter",
+    mode = "lines+markers",
+    line = list(color = colors["srad"]),
+    marker = list(color = colors["srad"], size = 8)
+  ) %>%
+  layout(
+    title = "Monthly Solar Radiation",
+    xaxis = list(
+      title = "Date",
+      range = date_range
+    ),
+    yaxis = list(title = "Solar Radiation (W/m²)"),
+    showlegend = FALSE
+  ) %>%
+  animation_opts(frame = 1000, transition = 500, redraw = TRUE) %>%
+  animation_slider(currentvalue = list(prefix = "Month: ", font = list(size = 12)))
+
+# tmax
+plotly_list$tmax <- plot_ly(historic_ts) %>%
+  add_trace(
+    x = ~as_date(Date),
+    y = ~tmax,
+    frame = ~as_date(Date),
+    type = "scatter",
+    mode = "lines+markers",
+    line = list(color = colors["tmax"]),
+    marker = list(color = colors["tmax"], size = 8)
+  ) %>%
+  layout(
+    title = "Monthly Maximum Temperature",
+    xaxis = list(
+      title = "Date",
+      range = date_range
+    ),
+    yaxis = list(title = "Temperature (°C)"),
+    showlegend = FALSE
+  ) %>%
+  animation_opts(frame = 1000, transition = 500, redraw = TRUE) %>%
+  animation_slider(currentvalue = list(prefix = "Month: ", font = list(size = 12)))
+
+# Flow
+plotly_list$Flow <- plot_ly(historic_ts) %>%
+  add_trace(
+    x = ~as_date(Date),
+    y = ~Flow,
+    frame = ~as_date(Date),
+    type = "scatter",
+    mode = "lines+markers",
+    line = list(color = colors["Flow"]),
+    marker = list(color = colors["Flow"], size = 8)
+  ) %>%
+  layout(
+    title = "Monthly Flow",
+    xaxis = list(
+      title = "Date",
+      range = date_range
+    ),
+    yaxis = list(title = "Flow (m³/s)"),
+    showlegend = FALSE
+  ) %>%
+  animation_opts(frame = 1000, transition = 500, redraw = TRUE) %>%
+  animation_slider(currentvalue = list(prefix = "Month: ", font = list(size = 12)))
+
+# Display animated plots
+subplot(plotly_list, nrows = 4, shareX = TRUE, titleY = TRUE)
+```
+
+## 3. Subseries
+
+```{r}
+gg_subseries(historic_ts)
+```
+
+There are 12 seasons (months) and there does seem to be higher values from Apr to Aug.
+
+## 4. Decomposition
+
+### Precip
+
+```{r}
+stl_ppt <- historic_ts %>%
+  select(Date, ppt) %>%
+  as_tsibble(index = Date) %>%
+  model(STL(ppt ~ trend(window = 3) + season(window = 7), robust = TRUE))
+
+components(stl_ppt) %>%
+  autoplot()
+```
+
+### Solar Radiation
+
+```{r}
+# STL for srad
+stl_srad <- historic_ts %>%
+  select(Date, srad) %>%
+  as_tsibble(index = Date) %>%
+  model(STL(srad ~ trend(window = 3) + season(window = Inf), robust = TRUE))
+
+components(stl_srad) %>%
+  autoplot()
+```
+
+### Max Temp
+
+```{r}
+# STL for tmax
+stl_tmax <- historic_ts %>%
+  select(Date, tmax) %>%
+  as_tsibble(index = Date) %>%
+  model(STL(tmax ~ trend(window = 3) + season(window = Inf), robust = TRUE))
+
+components(stl_tmax) %>%
+  autoplot()
+```
+
+### Flow
+
+```{r}
+# STL for Flow
+stl_flow <- historic_ts %>%
+  select(Date, Flow) %>%
+  as_tsibble(index = Date) %>%
+  model(STL(Flow ~ trend(window = 3) + season(window = 7), robust = TRUE))
+
+components(stl_flow) %>%
+  autoplot()
+```
+
+### Log of Flow
+
+```{r}
+stl_flow <- historic_ts %>%
+  mutate(Flow = log(Flow)) %>% 
+  select(Date, Flow) %>%
+  as_tsibble(index = Date) %>%
+  model(STL(Flow ~ trend(window = 3) + season(window = 7), robust = TRUE))
+
+components(stl_flow) %>%
+  autoplot()
+```
+
+For the decomp analysis, I decided to go with a 3 month trend window, as I feel like that best represent the "seasons" that these variables experience. Flow has trends of the runoff season, precip has its spring rainy season and winter snow season, and temp and srad both have seasonal trends that are similar (as you would expect).
+
+## Model Prediction
+
+```{r}
+# Adding a log of Flow column
+historic_ts <- historic_ts %>% 
+  mutate(log_Flow = log(Flow))
+
+# Adding a month and season column
+historic_ts <- historic_ts %>%
+  mutate(
+    month = month(Date, label = TRUE, abbr = FALSE),
+    season = case_when(
+      month %in% c("December", "January", "February") ~ "Winter",
+      month %in% c("March", "April", "May") ~ "Spring",
+      month %in% c("June", "July", "August") ~ "Summer",
+      month %in% c("September", "October", "November") ~ "Autumn"
+    )
+  )
+```
+
+```{r}
+set.seed(123)
+
+# Convert historic_ts to a tsibble temporarily to ensure proper Date handling
+historic_ts_tbl <- as_tsibble(historic_ts, index = Date)
+
+# Ensure Date is in Date format
+historic_ts_tbl <- historic_ts_tbl %>%
+  mutate(Date = as.Date(Date))
+
+# Convert back to a regular data frame
+historic_df <- as.data.frame(historic_ts_tbl)
+
+# Perform time series split
+split <- time_series_split(
+  historic_df,
+  initial = 108,
+  assess = "24 months",
+  cumulative = TRUE
+)
+
+# Check the split
+split
+```
+
+```{r}
+#Alternate manual method for split
+
+# Find the split date: 24 months before the max date
+#split_date <- max(historic_ts_tbl$Date) %m-% months(24)
+
+# Training set: everything before the split date
+#train_ts <- historic_ts_tbl %>%
+  #filter(Date <= split_date)
+
+# Test set (assessment set): everything after the split date
+#test_ts <- historic_ts_tbl %>%
+  #filter(Date > split_date)
+```
+
+```{r}
+data_train <- training(split)
+data_test <- testing(split)
+```
+
+## Model Definition
+
+```{r}
+mods <- list(
+  arima_reg() %>% 
+    set_engine("auto_arima"),
+  arima_boost(min_n = 2, learn_rate = 0.015) %>%
+    set_engine(engine = "auto_arima_xgboost"),
+  prophet_reg() %>% 
+    set_engine("prophet"),
+  prophet_boost() %>% 
+    set_engine("prophet_xgboost"),
+  exp_smoothing() %>% 
+    set_engine(engine = "ets"),
+  mars(mode = "regression") %>% 
+    set_engine("earth")
+)
+```
+
+## Model Fitting
+
+```{r}
+models <- map(mods, ~ fit(.x, log_Flow ~ tmax + ppt + season + Date, data = data_train))
+```
+
+```{r}
+(models_tbl <- as_modeltime_table(models))
+```
+
+## Model Calibration
+
+```{r}
+(calibration_table <- modeltime_calibrate(models_tbl, data_test, quiet = FALSE))
+```
+
+```{r}
+modeltime_accuracy(calibration_table) %>% 
+  arrange(mae)
+```
+
+## Forecasting
+
+```{r}
+pr_forecast <- calibration_table %>% 
+  modeltime_forecast(actual_data = historic_df,
+                     new_data = data_test)
+
+plot_modeltime_forecast(pr_forecast)
+```
+
+## Refitting the Model
+
+```{r}
+# adjust future data
+mod_future <- future %>% 
+  mutate(Date = as.Date(Date)) %>% 
+  mutate(
+    month = month(Date, label = TRUE, abbr = FALSE),
+    season = case_when(
+      month %in% c("December", "January", "February") ~ "Winter",
+      month %in% c("March", "April", "May") ~ "Spring",
+      month %in% c("June", "July", "August") ~ "Summer",
+      month %in% c("September", "October", "November") ~ "Autumn"
+    )
+  )
+```
+
+### Plot of forecast of all models
+
+```{r}
+refit_tbl <- calibration_table %>% 
+  modeltime_refit(data = historic_df)
+
+refit_tbl %>% 
+  modeltime_forecast(new_data = mod_future, actual_data = historic_df) %>% 
+  plot_modeltime_forecast()
+```
+
+### Mean Forecast Report
+
+```{r}
+# Generate forecast tbl
+forecast_tbl <- refit_tbl %>%
+  modeltime_forecast(
+    new_data = mod_future,
+    actual_data = historic_df,
+    verbose = TRUE
+  )
+```
+
+```{r}
+# Assuming forecast_tbl is the output of modeltime_forecast
+# Filter predictions and summarize
+summary_tbl <- forecast_tbl %>%
+  # Keep only forecast data (not actuals)
+  filter(.key == "prediction") %>%
+  # Group by date and model (if multiple models)
+  group_by(.index) %>%
+  # Summarize mean log_flow prediction and CI bounds for log_Flow
+  summarise(
+    mean_log_flow = mean(.value, na.rm = TRUE),
+    max_ci_log_flow = mean(.conf_hi, na.rm = TRUE),
+    min_ci_log_flow = mean(.conf_lo, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Convert from log_Flow to Flow
+  mutate(
+    mean_flow = exp(mean_log_flow),
+    max_ci_flow = exp(max_ci_log_flow),
+    min_ci_flow = exp(min_ci_log_flow)
+  ) %>%
+  # Select and rename columns for the final table
+  select(
+    Date = .index,
+    `Predicted Mean Flow` = mean_flow,
+    `Max Predicted Flow (95% CI)` = max_ci_flow,
+    `Min Predicted Flow (95% CI)` = min_ci_flow
+  ) %>%
+  # Optional: Round numeric columns for readability
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+# View the table
+#print(summary_tbl)
+
+# Format as a nice table using knitr
+kable(summary_tbl, caption = "Summary of Forecasted Flow")
+
+
+```
+
+### Summary of Flow Predictions and Historic Data
+
+```{r}
+# Compute mean, min, and max Flow from historic_df
+historic_stats <- historic_df %>%
+  mutate(month = month(Date)) %>% 
+  group_by(month) %>% 
+    summarise(
+      mean_historic_flow = mean(Flow, na.rm = TRUE),
+      min_historic_flow = min(Flow, na.rm = TRUE),
+      max_historic_flow = max(Flow, na.rm = TRUE)
+              ) %>% 
+    ungroup()
+
+# Add historic stats to summary_tbl by matching month
+summary_tbl_with_historic <- summary_tbl %>%
+  # Extract month from Date (as ordered factor to match historic_df)
+  mutate(month = month(Date)) %>%
+  group_by(month) %>% 
+  # Join with historic_stats by month
+  left_join(historic_stats, by = "month") %>%
+  ungroup() %>% 
+  #Remove temporary month column
+  select(-month) %>%
+  # Round historic stats and rename
+  mutate(
+    `2013-2023 Mean Monthly Flow` = round(mean_historic_flow, 2),
+    `2013-2023 Min Monthly Flow` = round(min_historic_flow, 2),
+    `2013-2023 Max Monthly Flow` = round(max_historic_flow, 2)
+  ) %>%
+  # Remove intermediate columns
+  select(-mean_historic_flow, -min_historic_flow, -max_historic_flow)
+
+# Create flextable
+ft <- flextable(summary_tbl_with_historic) %>%
+  # Set table header
+  set_caption("Forecasted Flow with Historic Summary") %>%
+  # Format date column
+  colformat_date(j = "Date") %>%
+  # Format numeric columns to 2 decimal places
+  colformat_double(j = c("Predicted Mean Flow", 
+                               "Max Predicted Flow (95% CI)", 
+                               "Min Predicted Flow (95% CI)", 
+                               "2013-2023 Mean Monthly Flow",
+                               "2013-2023 Min Monthly Flow", 
+                               "2013-2023 Max Monthly Flow"), 
+                                digits = 2) %>%
+  # Adjust column widths
+  autofit() %>%
+  # Apply a theme for professional look
+  theme_vanilla() %>%
+  # Align text
+  align(align = "center", part = "all")
+
+# Display table
+print(ft)
+```
+
+### Grab recent flow data
+
+```{r}
+# Example: Cache la Poudre River at Mouth (USGS site 06752260)
+new_poudre_flow <- readNWISdv(siteNumber = "06752260",    # Download data from USGS for site 06752260
+                          parameterCd = "00060",      # Parameter code 00060 = discharge in cfs)
+                          startDate = "2024-01-01",   # Set the start date
+                          endDate = "2025-04-30") |>  # Set the end date
+  renameNWISColumns() |> # Rename columns to standard names (e.g., "Flow", "Date")
+  mutate(Date = yearmonth(Date)) |> # Convert daily Date values into a year-month format (e.g., "2023 Jan")
+  group_by(Date) |> # Group the data by the new monthly Date
+  summarise(Flow = mean(Flow)) |> # Calculate the average daily flow for each month
+  mutate(Date = as.Date(Date)) |>
+  mutate('Observed Flow' = Flow) |>
+  select(-Flow)
+```
+
+### Update Summary with Observed Flows
+
+```{r}
+# add to summary table
+summary_tbl_update <- summary_tbl_with_historic %>% 
+  left_join(new_poudre_flow, by = "Date")
+  
+
+# Create flextable
+ft_update <- flextable(summary_tbl_update) %>%
+  # Set table header
+  set_caption("Forecasted Flow with Historic Summary and Recently Observed Flow") %>%
+  # Format date column
+  colformat_date(j = "Date") %>%
+  # Format numeric columns to 2 decimal places
+  colformat_double(j = c("Predicted Mean Flow", 
+                               "Max Predicted Flow (95% CI)", 
+                               "Min Predicted Flow (95% CI)", 
+                               "2013-2023 Mean Monthly Flow",
+                               "2013-2023 Min Monthly Flow", 
+                               "2013-2023 Max Monthly Flow",
+                               "Observed Flow"),
+                                digits = 2) %>%
+  # Adjust column widths
+  autofit() %>%
+  # Apply a theme for professional look
+  theme_vanilla() %>%
+  # Align text
+  align(align = "center", part = "all")
+
+# Display table
+print(ft_update)
+```
+
+### Plot of Summary Data
+
+```{r}
+# Reshape data for plotting with legend
+plot_data_long <- summary_tbl_update %>%
+  pivot_longer(
+    cols = c(
+      `Predicted Mean Flow`,
+      `Min Predicted Flow (95% CI)`,
+      `Max Predicted Flow (95% CI)`,
+      `2013-2023 Mean Monthly Flow`,
+      `Observed Flow`
+    ),
+    names_to = "LineType",
+    values_to = "FlowValue"
+  )
+
+# Get range of dates and flows for positioning the annotation
+x_max <- max(summary_tbl_update$Date, na.rm = TRUE)
+x_min <- min(summary_tbl_update$Date, na.rm = TRUE)
+y_max <- max(summary_tbl_update$`2013-2023 Max Monthly Flow`, 
+             summary_tbl_update$`Max Predicted Flow (95% CI)`,
+             summary_tbl_update$`Observed Flow`, na.rm = TRUE)
+
+# Add some padding to avoid overlapping the lines
+x_pos <- x_max - (x_max - x_min) * 0.1  # 10% from the right
+y_pos <- y_max * 0.95                   # 95% up the Y axis
+
+# Plot with annotation
+ggplot() +
+  # Ribbon for historic min/max
+  geom_ribbon(data = summary_tbl_update,
+              aes(x = Date,
+                  ymin = `2013-2023 Min Monthly Flow`,
+                  ymax = `2013-2023 Max Monthly Flow`),
+              fill = "gray80", alpha = 0.6, show.legend = FALSE) +
+
+  # Lines with legend
+  geom_line(data = plot_data_long,
+            aes(x = Date, y = FlowValue, color = LineType, linetype = LineType),
+            size = 1) +
+
+  # Manual color and linetype scales
+  scale_color_manual(
+    values = c(
+      "Predicted Mean Flow" = "blue",
+      "Min Predicted Flow (95% CI)" = "red",
+      "Max Predicted Flow (95% CI)" = "green",
+      "2013-2023 Mean Monthly Flow" = "grey",
+      "Observed Flow" = "black"
+    )
+  ) +
+  scale_linetype_manual(
+    values = c(
+      "Predicted Mean Flow" = "dashed",
+      "Min Predicted Flow (95% CI)" = "dashed",
+      "Max Predicted Flow (95% CI)" = "dashed",
+      "2013-2023 Mean Monthly Flow" = "solid",
+      "Observed Flow" = "solid"
+    )
+  ) +
+
+  # Caption as annotation in top-right
+  annotate("text", 
+           x = x_pos, 
+           y = y_pos, 
+           label = "Shaded area: 2013–2023 min/max\nGray line: 2013–2023 mean", 
+           hjust = 1, 
+           vjust = 1, 
+           size = 4, 
+           fontface = "italic",
+           color = "black") +
+
+  labs(
+    title = "Forecasted and Observed Streamflow with Historic Summary (2013–2023)",
+    y = "Monthly Flow (cfs)",
+    x = "Date",
+    color = "Legend",
+    linetype = "Legend"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(size = 12),
+    legend.position = "bottom"
+  )
+
+```
+
+### Facet Plot by Year
+
+```{r}
+# Add Year column for faceting
+summary_tbl_update <- summary_tbl_update %>%
+  mutate(Year = year(Date))
+
+# Pivot longer for line plotting
+plot_data_long <- summary_tbl_update %>%
+  pivot_longer(
+    cols = c(
+      `Predicted Mean Flow`,
+      `Min Predicted Flow (95% CI)`,
+      `Max Predicted Flow (95% CI)`,
+      `2013-2023 Mean Monthly Flow`,
+      `Observed Flow`
+    ),
+    names_to = "LineType",
+    values_to = "FlowValue"
+  )
+
+# Plot with facets by Year
+ggplot() +
+  # Ribbon for historic min/max
+  geom_ribbon(data = summary_tbl_update,
+              aes(x = Date,
+                  ymin = `2013-2023 Min Monthly Flow`,
+                  ymax = `2013-2023 Max Monthly Flow`),
+              fill = "gray80", alpha = 0.6, show.legend = FALSE) +
+
+  # Lines with color/linetype legend
+  geom_line(data = plot_data_long,
+            aes(x = Date, y = FlowValue, color = LineType, linetype = LineType),
+            size = 0.8) +
+
+  scale_color_manual(
+    values = c(
+      "Predicted Mean Flow" = "blue",
+      "Min Predicted Flow (95% CI)" = "red",
+      "Max Predicted Flow (95% CI)" = "green",
+      "2013-2023 Mean Monthly Flow" = "grey",
+      "Observed Flow" = "black"
+    )
+  ) +
+  scale_linetype_manual(
+    values = c(
+      "Predicted Mean Flow" = "dashed",
+      "Min Predicted Flow (95% CI)" = "dashed",
+      "Max Predicted Flow (95% CI)" = "dashed",
+      "2013-2023 Mean Monthly Flow" = "solid",
+      "Observed Flow" = "solid"
+    )
+  ) +
+
+  facet_wrap(~ Year, scales = "free_x", ncol = 2) +
+
+  labs(
+    title = "Forecasted and Observed Streamflow by Year",
+    subtitle = "With 2013–2023 Historic Range and Mean",
+    x = "Date", y = "Flow (cfs)",
+    color = "Legend", linetype = "Legend"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    strip.text = element_text(size = 11, face = "bold"),
+    axis.title = element_text(size = 12),
+    legend.position = "bottom"
+  )
+
+```
+
+### Plot of 2024 to 2026
+
+```{r}
+# Filter to 2024–2026
+subset_data <- summary_tbl_update %>%
+  filter(year(Date) %in% 2024:2026) %>%
+  mutate(Year = year(Date))
+
+# Reshape for lines
+plot_data_long <- subset_data %>%
+  pivot_longer(
+    cols = c(
+      `Predicted Mean Flow`,
+      `Min Predicted Flow (95% CI)`,
+      `Max Predicted Flow (95% CI)`,
+      `2013-2023 Mean Monthly Flow`,
+      `Observed Flow`
+    ),
+    names_to = "LineType",
+    values_to = "FlowValue"
+  )
+
+# Plot
+ggplot() +
+  # Historic ribbon
+  geom_ribbon(data = subset_data,
+              aes(x = Date,
+                  ymin = `2013-2023 Min Monthly Flow`,
+                  ymax = `2013-2023 Max Monthly Flow`),
+              fill = "gray80", alpha = 0.6, show.legend = FALSE) +
+
+  # Forecast & observed lines
+  geom_line(data = plot_data_long,
+            aes(x = Date, y = FlowValue, color = LineType, linetype = LineType),
+            size = 1) +
+
+  # Manual legend styles
+  scale_color_manual(
+    values = c(
+      "Predicted Mean Flow" = "blue",
+      "Min Predicted Flow (95% CI)" = "red",
+      "Max Predicted Flow (95% CI)" = "green",
+      "2013-2023 Mean Monthly Flow" = "gray",
+      "Observed Flow" = "black"
+    )
+  ) +
+  scale_linetype_manual(
+    values = c(
+      "Predicted Mean Flow" = "dashed",
+      "Min Predicted Flow (95% CI)" = "dashed",
+      "Max Predicted Flow (95% CI)" = "dashed",
+      "2013-2023 Mean Monthly Flow" = "solid",
+      "Observed Flow" = "solid"
+    )
+  ) +
+
+  labs(
+    title = "Forecasted and Observed Streamflow (2024–2026)",
+    subtitle = "Includes 95% CI and 2013–2023 Historical Ranges",
+    x = "Date", y = "Flow (cfs)",
+    color = "Legend", linetype = "Legend"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    axis.title = element_text(size = 12),
+    legend.position = "bottom"
+  )
+```
+
+## Wrap Up
+
+It seems the model is performing overall very well for working on monthly values. I think it may be less accurate on modeling peak flows. It also seems to be missing a late fall flow increase, which could be reservoir releases, water transfers, or more reflective of the natural flow when agricultural diversions are shut off. My guess is that it is likely a senior water right call on the river resulting in water being bypassed. The modification of flows in the system also make it difficult to model both the flow and the timing of the flow.

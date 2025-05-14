@@ -653,15 +653,25 @@ test_metrics <- results_test %>%
 
 # Print test set metrics
 print(test_metrics)
+```
 
-# plot observed vs. predicted
-library(ggplot2)
+```{r}
+# Extract RMSE and R² from test_metrics
+rmse_val <- round(test_metrics$.estimate[test_metrics$.metric == "rmse"], 3)
+rsq_val <- round(test_metrics$.estimate[test_metrics$.metric == "rsq"], 3)
+
+# Create text for RMSE and R²
+metrics_text <- paste0("RMSE = ", rmse_val, "\nR² = ", rsq_val)
+
+# Plot observed vs. predicted with test metrics
 results_test %>%
   ggplot(aes(x = logQmean, y = .pred)) +
   geom_point() +
   geom_abline(slope = 1, intercept = 0, color = "red") +
-  labs(x = "Observed logQmean", y = "Predicted logQmean", 
-       title = "Tuned Neural Network: Test Set Predictions")
+  annotate("text", x = Inf, y = -Inf, label = metrics_text, hjust = 1.1, vjust = -0.5, size = 4, lineheight = 0.8) +
+  labs(x = "Observed logQ mean", y = "Predicted logQ mean", 
+       title = "Tuned Neural Network: Test Set Predictions") +
+  theme_minimal()
 ```
 
 ### Check VIP
